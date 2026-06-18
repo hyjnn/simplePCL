@@ -7,6 +7,8 @@
 #include <fstream>
 #include <utility>
 
+#include <eigen3/Eigen/SparseCholesky>
+
 #include "MDVector.hpp"
 #include "FDTD.hpp"
 
@@ -233,6 +235,79 @@ namespace PIC {
             tracked_velocities[i][last_row, 0] = particle_sim.getVelocities()[i, 0];
             tracked_velocities[i][last_row, 1] = particle_sim.getVelocities()[i, 1];
         }
+    }
+
+    Eigen::SimplicialLDLT<Eigen::SparseMatrix<floatType, Eigen::RowMajor>> SimEngine::calcPoissonLDLT() {
+        std::size_t x_dim = field_sim.getShape()[0], mat_dim = x_dim*field_sim.getShape()[1];
+        floatType val_small = 1 / space_step*space_step, val_med = -2 * val_small, val_big = -4 * val_small; // The three non-zero values in the matrix
+        Eigen::SparseMatrix<floatType, Eigen::RowMajor> poisson_mat(mat_dim, mat_dim);
+
+        poisson_mat.reserve(Eigen::VectorXi::Constant(mat_dim, 5));
+        for (std::size_t i = 0; i < mat_dim; i++) { // Field data is to be vectorised row-major 
+            if (i < x_dim) { // on y=0 wall with corners
+                if (i != 0 && i != x_dim-1) { // not a corner
+                    poisson_mat.insert(i, i+x_dim) = val_small;
+                    poisson_mat.insert(i, i) = val_med;
+                }
+                else { // corner
+                    poisson_mat.insert(i, i) = 1;
+                }
+            }
+            else if (i >= mat_dim - x_dim) { // on y=y_max wall with corners
+                if (i != mat_dim - x_dim && i != mat_dim-1) { // not a corner
+                    poisson_mat.insert(i, i-x_dim) = val_small;
+                    poisson_mat.insert(i, i) = val_med;
+                }
+                else { // corner
+                    poisson_mat.insert(i, i) = 1;
+                }
+            }
+            else if (i % x_dim == 0) { // on x=0 wall without corners
+                poisson_mat.insert(i, i+1) = val_small;
+                poisson_mat.insert(i, i) = val_med;
+            }
+            else if ((i+1) % x_dim == 0) { // on x=x_max wall without corners
+                poisson_mat.insert(i, i-1) = val_small;
+                poisson_mat.insert(i, i) = val_med;
+            }
+            else { // inside the interior
+                poisson_mat.insert(i, i-x_dim) = val_small;
+                poisson_mat.insert(i, i-1) = val_small;
+                poisson_mat.insert(i, i) = val_big;
+                poisson_mat.insert(i, i+1) = val_small;
+                poisson_mat.insert(i, i+x_dim) = val_small;
+            }
+        }
+
+        return Eigen::SimplicialLDLT<Eigen::SparseMatrix<floatType, Eigen::RowMajor>>(poisson_mat);
+    }
+
+    Eigen::Vector<floatType, Eigen::Dynamic> SimEngine::depositCharge() {
+        const std::size_t x_dim = field_sim.getShape()[0], mat_dim = x_dim * field_sim.getShape()[1];
+        Eigen::Vector<floatType, Eigen::Dynamic> result = Eigen::Vector<floatType, Eigen::Dynamic>::Zero(mat_dim);
+        floatType i, j; // index-like coordinates aligned to nodes of the yee grid
+        std::size_t i_min, i_max, j_min, j_max;
+
+        for (std::size_t n = 0; n < particle_sim.getParticleCount(); n++) {
+            i = particle_sim.getPositions()[n, 0] / space_step;
+            j = particle_sim.getPositions()[n, 1] / space_step;
+            
+            i_min = std::floor(i), j_min = std::floor(j), i_max = i_min + 1, j_max = j_min + 1;
+            i -= i_min, j -= j_min;
+
+            result(i_min + j_min * x_dim) = (1-i)*(1-j)*particle_sim.getCharges()[n];
+            result(i_min + j_max * x_dim) = (1-i)*( j )*particle_sim.getCharges()[n];
+            result(i_max + j_min * x_dim) = ( i )*(1-j)*particle_sim.getCharges()[n];
+            result(i_max + j_max * x_dim) = ( j )*( j )*particle_sim.getCharges()[n];
+        }
+
+        return result;
+    }
+
+    void SimEngine::cleanDivergence() {
+        static const auto poisson_LDLT = calcPoissonLDLT();
+        
+        Eigen::Vector<floatType, Eigen::Dynamic> clean_potential = poisson_LDLT.solve(depositCharge());
     }
 
     floatType SimEngine::gatherComponent(const std::size_t field_comp, const std::size_t particle_num)

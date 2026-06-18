@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.28)
 project(myPIC VERSION 0.1 DESCRIPTION "Practice PIC simulation code" LANGUAGES CXX)
 
+find_package(Eigen3 REQUIRED NO_MODULE)
+
 add_library(MDVeclib INTERFACE)
 target_include_directories(MDVeclib INTERFACE src/)
 target_compile_features(MDVeclib INTERFACE cxx_std_23)
@@ -9,6 +11,7 @@ add_library(FDTDlib SHARED src/FDTD.cpp)
 target_include_directories(FDTDlib PUBLIC src/)
 target_compile_features(FDTDlib PUBLIC cxx_std_23)
 target_link_libraries(FDTDlib PUBLIC MDVeclib)
+target_link_libraries(FDTDlib PRIVATE Eigen3::Eigen)
 
 add_executable(PIC src/main.cpp)
 target_include_directories(PIC PRIVATE src/) # Redundant right now but kept here in case I move the library headers

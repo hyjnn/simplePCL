@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include <eigen3/Eigen/SparseCholesky>
+
 #include "MDVector.hpp"
 
 namespace PIC {
@@ -105,6 +107,9 @@ namespace PIC {
         std::array<floatType, 2> physToIndex(std::array<floatType, 2> point, std::size_t field_comp); // Convert point to index-like coordinates for specified field component.
         void syncSteps(); // Set the steps in field_sim and particle_sim to the steps in this object.
         void updateTracked();
+        Eigen::SimplicialLDLT<Eigen::SparseMatrix<floatType, Eigen::RowMajor>> calcPoissonLDLT(); // Calculates the LDLT decomposition of the Poisson eq matrix.
+        Eigen::Vector<floatType, Eigen::Dynamic> depositCharge(); // Deposits charge into Eigen vector to later use when solving the Poisson eq
+        void cleanDivergence();
 
         floatType gatherComponent(std::size_t field_comp, std::size_t particle_num); // Gathers specified field component onto specified index-like point.
         MDVector<floatType, 2> fieldGather(); // Calculates and returns fields at current particle locations according to the energy conserving scheme as described in Vay.
