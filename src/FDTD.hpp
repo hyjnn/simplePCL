@@ -88,10 +88,7 @@ namespace PIC {
 
     class SimEngine {
         /*
-            This class mixes two coordinate systems - the physical coordinates, which are used by ParticleMover to store the particle coordinates,
-            and index-like coordinates, which are really a set of 6 different systems, corresponding to the 6 field components. These come from treating
-            the indices of the points on which the given field is known as their coordinates, and extending this linearly to the entire simulation
-            region. So, the index-like coordinates are rescaled and shifted physical coordinates.
+            The E field and particle positions are known at the same times, velocities and B field are staggered by a half-step.
         */
 
         FieldSolver field_sim;
@@ -104,11 +101,18 @@ namespace PIC {
         std::vector<MDVector<floatType, 2>> tracked_positions; // Stores position history of tracked particles.
         std::vector<MDVector<floatType, 2>> tracked_velocities; // Stores velocity history of tracked particles.
 
-        std::array<floatType, 2> physToIndex(std::array<floatType, 2> point, std::size_t field_comp); // Convert point to index-like coordinates for specified field component.
-        void syncSteps(); // Set the steps in field_sim and particle_sim to the steps in this object.
+        /*
+            Convert point to index-like coordinates for specified field component.
+            For a given field component, integer coordinate points correspond to points at which the field is known.
+        */
+        std::array<floatType, 2> physToIndex(std::array<floatType, 2> point, std::size_t field_comp);
+        // Set the steps in field_sim and particle_sim to the steps in this object.
+        void syncSteps();
         void updateTracked();
-        Eigen::SimplicialLDLT<Eigen::SparseMatrix<floatType, Eigen::RowMajor>> calcPoissonLDLT(); // Calculates the LDLT decomposition of the Poisson eq matrix.
-        Eigen::Vector<floatType, Eigen::Dynamic> depositCharge(); // Deposits charge into Eigen vector to later use when solving the Poisson eq
+        // Calculates the LDLT decomposition of the Poisson eq matrix.
+        Eigen::SimplicialLDLT<Eigen::SparseMatrix<floatType, Eigen::RowMajor>> calcPoissonLDLT();
+        // Deposits charge into Eigen vector to later use when solving the Poisson eq. The resulting values are already multiplied by -1/eps0.
+        Eigen::Vector<floatType, Eigen::Dynamic> depositCharge();
         void cleanDivergence();
 
         floatType gatherComponent(std::size_t field_comp, std::size_t particle_num); // Gathers specified field component onto specified index-like point.

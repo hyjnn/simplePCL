@@ -286,6 +286,7 @@ namespace PIC {
         const std::size_t x_dim = field_sim.getShape()[0], mat_dim = x_dim * field_sim.getShape()[1];
         Eigen::Vector<floatType, Eigen::Dynamic> result = Eigen::Vector<floatType, Eigen::Dynamic>::Zero(mat_dim);
         floatType i, j; // index-like coordinates aligned to nodes of the yee grid
+        floatType charge_density;
         std::size_t i_min, i_max, j_min, j_max;
 
         for (std::size_t n = 0; n < particle_sim.getParticleCount(); n++) {
@@ -294,20 +295,40 @@ namespace PIC {
             
             i_min = std::floor(i), j_min = std::floor(j), i_max = i_min + 1, j_max = j_min + 1;
             i -= i_min, j -= j_min;
+            charge_density = -particle_sim.getCharges()[n] / space_step / space_step / eps0;
 
-            result(i_min + j_min * x_dim) = (1-i)*(1-j)*particle_sim.getCharges()[n];
-            result(i_min + j_max * x_dim) = (1-i)*( j )*particle_sim.getCharges()[n];
-            result(i_max + j_min * x_dim) = ( i )*(1-j)*particle_sim.getCharges()[n];
-            result(i_max + j_max * x_dim) = ( j )*( j )*particle_sim.getCharges()[n];
+            result(i_min + j_min * x_dim) += (1-i)*(1-j)*charge_density;
+            result(i_min + j_max * x_dim) += (1-i)*( j )*charge_density;
+            result(i_max + j_min * x_dim) += ( i )*(1-j)*charge_density;
+            result(i_max + j_max * x_dim) += ( i )*( j )*charge_density;
         }
+
+        // Weird trick needed due to the Poisson eq with PEC BCs needing the density to be zero at corners
+        result(0) = 0; 
+        result(x_dim - 1) = 0;
+        result(mat_dim - x_dim) = 0;
+        result(mat_dim - 1) = 0;
 
         return result;
     }
 
     void SimEngine::cleanDivergence() {
         static const auto poisson_LDLT = calcPoissonLDLT();
-        
         Eigen::Vector<floatType, Eigen::Dynamic> clean_potential = poisson_LDLT.solve(depositCharge());
+        std::size_t flat_index;
+
+        assert(clean_potential.size() == field_sim.getShape()[0] * field_sim.getShape()[1]);
+        for (std::size_t i = 0; i < field_sim.getShape()[0]; i++) {
+            for (std::size_t j = 0; j < field_sim.getShape()[1]; j++) {
+                flat_index = j * field_sim.getShape()[0] + i;
+                if (i != field_sim.getShape()[0] - 1) {
+                    field_sim.getFields()[0][i, j] -= (clean_potential(flat_index + 1) - clean_potential(flat_index)) / space_step;
+                }
+                if (j != field_sim.getShape()[0] - 1) {
+                    field_sim.getFields()[1][i, j] -= (clean_potential(flat_index + field_sim.getShape()[0]) - clean_potential(flat_index)) / space_step;
+                }
+            }
+        }
     }
 
     floatType SimEngine::gatherComponent(const std::size_t field_comp, const std::size_t particle_num)
@@ -449,6 +470,7 @@ namespace PIC {
     }
 
     void SimEngine::initialize() {
+        cleanDivergence();
         prev_positions = particle_sim.getPositions();
         particle_sim.move();
         updateTracked();

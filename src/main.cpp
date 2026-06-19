@@ -32,7 +32,7 @@ int main() {
     auto &field_sim = sim.getFieldSim();
     auto &particle_sim = sim.getParticleSim();
     auto &positions = particle_sim.getPositions();
-    fundamentalMode(field_sim);
+    // fundamentalMode(field_sim);
 
     positions[0, 0] = 200 * field_sim.getSpaceStep();
     positions[0, 1] = 200 * field_sim.getSpaceStep();
