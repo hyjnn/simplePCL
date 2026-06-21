@@ -37,6 +37,7 @@ namespace PIC {
         // Array storing the Ex, Ey, Ez, Hx, Hy, Hz fields in this order.
         // IMPORTANT: Due to the Yee grid's structure, certain edge elements of the fields lie outside of the simulation region!
         std::array<MDVector<floatType, 2>, 6> fields;
+        std::array<MDVector<floatType, 2>, 6> prev_fields;
         MDVector<floatType, 2> permittivity; // Absolute permittivity
         std::array<MDVector<floatType, 2>, 3> current;
 
@@ -50,6 +51,7 @@ namespace PIC {
         FieldSolver(std::array<std::size_t, 2>); // Constructs a FieldSolver object with specified shape.
 
         std::array<MDVector<floatType, 2>, 6> &getFields(); // Currently, changing the shape of fields with this WILL BREAK THE PROGRAM. TO BE CORRECTED!!!!
+        std::array<MDVector<floatType, 2>, 6> &getPrevFields();
         std::array<MDVector<floatType, 2>, 3> &getCurrent();
         MDVector<floatType, 2> &getPermittivity();
         const floatType &getSpaceStep() const;
@@ -95,11 +97,13 @@ namespace PIC {
         ParticleMover particle_sim;
         floatType time = 0;
         floatType time_step = 1./(c*std::sqrt(2.)), space_step = 1;
+        floatType background_charge = 0;
 
-        std::array<MDVector<floatType, 2>, 6> prev_fields;
         MDVector<floatType, 2> prev_positions;
         std::vector<MDVector<floatType, 2>> tracked_positions; // Stores position history of tracked particles.
         std::vector<MDVector<floatType, 2>> tracked_velocities; // Stores velocity history of tracked particles.
+
+        Eigen::SimplicialLDLT<Eigen::SparseMatrix<floatType, Eigen::RowMajor>> poisson_LDLT;
 
         /*
             Convert point to index-like coordinates for specified field component.
@@ -111,9 +115,12 @@ namespace PIC {
         void updateTracked();
         // Calculates the LDLT decomposition of the Poisson eq matrix.
         Eigen::SimplicialLDLT<Eigen::SparseMatrix<floatType, Eigen::RowMajor>> calcPoissonLDLT();
-        // Deposits charge into Eigen vector to later use when solving the Poisson eq. The resulting values are already multiplied by -1/eps0.
-        Eigen::Vector<floatType, Eigen::Dynamic> depositCharge();
+        // Calculates discrepancy between E divergence and charge density. Returns result as an Eigen::Vector to later use when solving the Poisson eq.
+        Eigen::Vector<floatType, Eigen::Dynamic> calcDivDiff();
+        void depositCharge(Eigen::Vector<floatType, Eigen::Dynamic> &dest); // Deposits charge in calcDivDiff
+        void depositDivergence(Eigen::Vector<floatType, Eigen::Dynamic> &dest); // Deposits divergence in calcDivDiff
         void cleanDivergence();
+        void exportPotential(std::string filename, const Eigen::Vector<floatType, Eigen::Dynamic> &potential);
 
         floatType gatherComponent(std::size_t field_comp, std::size_t particle_num); // Gathers specified field component onto specified index-like point.
         MDVector<floatType, 2> fieldGather(); // Calculates and returns fields at current particle locations according to the energy conserving scheme as described in Vay.
@@ -126,6 +133,8 @@ namespace PIC {
 
         FieldSolver &getFieldSim();
         ParticleMover &getParticleSim();
+        floatType getBackgroundCharge();
+        void setBackgroundCharge(floatType);
 
         //void trackParticle(std::size_t); // Turns on tracking for particle with chosen index.
         void exportTracked(std::string); // Saves tracked particle positions to file.

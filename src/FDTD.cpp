@@ -5,6 +5,7 @@
 #include <exception>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <utility>
 
 #include <eigen3/Eigen/SparseCholesky>
@@ -46,11 +47,16 @@ namespace PIC {
     FieldSolver::FieldSolver(const std::array<std::size_t, 2> shape) : shape(shape), permittivity(shape, 1*eps0) {
         fields.fill(MDVector<floatType, 2>(shape));
         current.fill(MDVector<floatType, 2>(shape));
+        prev_fields.fill(MDVector<floatType, 2>(shape));
     }
     std::array<MDVector<floatType, 2>, 6> &FieldSolver::getFields() {
         return fields;
     }
-    std::array<MDVector<floatType, 2>, 3> &FieldSolver::getCurrent() {
+    std::array<MDVector<floatType, 2>, 6> &FieldSolver::getPrevFields() {
+        return prev_fields;
+    }
+    std::array<MDVector<floatType, 2>, 3> &FieldSolver::getCurrent()
+    {
         return current;
     }
     MDVector<floatType, 2> &FieldSolver::getPermittivity()
@@ -111,10 +117,13 @@ namespace PIC {
         for (std::size_t i = 0; i < shape[0]; i++) {
             for (std::size_t j = 0; j < shape[1]; j++) {
                     std::string line;
-                    for (std::size_t n = 0; n < 5; n++) {
+                    for (std::size_t n = 0; n < 3; n++) {
                         line += std::format("{} ", fields[n][i, j]);
                     }
-                    line += std::format("{}\n", fields[5][i, j]);
+                    for (std::size_t n = 3; n < 5; n++) {
+                        line += std::format("{} ", (fields[n][i, j] + prev_fields[n][i, j]) / 2);
+                    }
+                    line += std::format("{}\n", (fields[5][i, j] + prev_fields[5][i, j]) / 2);
 
                     outfile << line;
             }
@@ -172,8 +181,7 @@ namespace PIC {
     void ParticleMover::kickMove(const MDVector<floatType, 2> &fields)
     {
         MDVector<floatType, 1> u_minus({ 2 }), u_prime({ 2 }), u_plus({ 2 });
-        floatType A, B, u_natural; // helper variables
-
+        floatType A, B, u_natural, gamma; // helper variables
         for (std::size_t i = 0; i < charges.shape[0]; i++) {
             // Update velocities
             A = time_step * charges[i] / (2 * masses[i]);
@@ -194,8 +202,9 @@ namespace PIC {
             velocities[i, 1] = u_plus[1] + A * fields[1, i];
 
             // Update positions
-            positions[i, 0] += time_step / std::sqrt(1 / (c*c) + 1 / (velocities[i, 0] * velocities[i, 0]));
-            positions[i, 1] += time_step / std::sqrt(1 / (c*c) + 1 / (velocities[i, 1] * velocities[i, 1]));
+            gamma = std::sqrt(1 + (velocities[i, 0]*velocities[i, 0] + velocities[i, 1]*velocities[i, 1]) / (c*c));
+            positions[i, 0] += time_step * velocities[i, 0] / gamma;
+            positions[i, 1] += time_step * velocities[i, 1] / gamma;
         }
     }
 
@@ -238,53 +247,34 @@ namespace PIC {
     }
 
     Eigen::SimplicialLDLT<Eigen::SparseMatrix<floatType, Eigen::RowMajor>> SimEngine::calcPoissonLDLT() {
-        std::size_t x_dim = field_sim.getShape()[0], mat_dim = x_dim*field_sim.getShape()[1];
-        floatType val_small = 1 / space_step*space_step, val_med = -2 * val_small, val_big = -4 * val_small; // The three non-zero values in the matrix
+        std::size_t x_dim = field_sim.getShape()[0], mat_dim = (x_dim-2)*(field_sim.getShape()[1]-2);
+        floatType val_small = 1 / (space_step*space_step), val_big = -4 * val_small; // The three non-zero values in the matrix
         Eigen::SparseMatrix<floatType, Eigen::RowMajor> poisson_mat(mat_dim, mat_dim);
 
         poisson_mat.reserve(Eigen::VectorXi::Constant(mat_dim, 5));
         for (std::size_t i = 0; i < mat_dim; i++) { // Field data is to be vectorised row-major 
-            if (i < x_dim) { // on y=0 wall with corners
-                if (i != 0 && i != x_dim-1) { // not a corner
-                    poisson_mat.insert(i, i+x_dim) = val_small;
-                    poisson_mat.insert(i, i) = val_med;
-                }
-                else { // corner
-                    poisson_mat.insert(i, i) = 1;
-                }
+            if (i >= x_dim-2) { // outside of the y=1 wall
+                poisson_mat.insert(i, i-(x_dim-2)) = val_small;
             }
-            else if (i >= mat_dim - x_dim) { // on y=y_max wall with corners
-                if (i != mat_dim - x_dim && i != mat_dim-1) { // not a corner
-                    poisson_mat.insert(i, i-x_dim) = val_small;
-                    poisson_mat.insert(i, i) = val_med;
-                }
-                else { // corner
-                    poisson_mat.insert(i, i) = 1;
-                }
+            if (i < mat_dim - x_dim + 2) { // outside of the y=y_max-1 wall
+                poisson_mat.insert(i, i+(x_dim-2)) = val_small;
             }
-            else if (i % x_dim == 0) { // on x=0 wall without corners
-                poisson_mat.insert(i, i+1) = val_small;
-                poisson_mat.insert(i, i) = val_med;
-            }
-            else if ((i+1) % x_dim == 0) { // on x=x_max wall without corners
+            if (i % (x_dim-2) != 0) { // outsie of the x=1 wall
                 poisson_mat.insert(i, i-1) = val_small;
-                poisson_mat.insert(i, i) = val_med;
             }
-            else { // inside the interior
-                poisson_mat.insert(i, i-x_dim) = val_small;
-                poisson_mat.insert(i, i-1) = val_small;
-                poisson_mat.insert(i, i) = val_big;
+            if ((i+1) % (x_dim-2) != 0) { // outside of the x=x_max-1 wall
                 poisson_mat.insert(i, i+1) = val_small;
-                poisson_mat.insert(i, i+x_dim) = val_small;
             }
+            poisson_mat.insert(i, i) = val_big;
         }
+
+        Eigen::SparseMatrix<floatType, Eigen::RowMajor> poisson_mat_T = poisson_mat.transpose();
 
         return Eigen::SimplicialLDLT<Eigen::SparseMatrix<floatType, Eigen::RowMajor>>(poisson_mat);
     }
-
-    Eigen::Vector<floatType, Eigen::Dynamic> SimEngine::depositCharge() {
-        const std::size_t x_dim = field_sim.getShape()[0], mat_dim = x_dim * field_sim.getShape()[1];
-        Eigen::Vector<floatType, Eigen::Dynamic> result = Eigen::Vector<floatType, Eigen::Dynamic>::Zero(mat_dim);
+    
+    void SimEngine::depositCharge(Eigen::Vector<floatType, Eigen::Dynamic> &dest) {
+        const std::size_t x_dim = field_sim.getShape()[0], y_dim = field_sim.getShape()[1], mat_dim = (x_dim-2) * (y_dim-2);
         floatType i, j; // index-like coordinates aligned to nodes of the yee grid
         floatType charge_density;
         std::size_t i_min, i_max, j_min, j_max;
@@ -295,39 +285,77 @@ namespace PIC {
             
             i_min = std::floor(i), j_min = std::floor(j), i_max = i_min + 1, j_max = j_min + 1;
             i -= i_min, j -= j_min;
-            charge_density = -particle_sim.getCharges()[n] / space_step / space_step / eps0;
+            charge_density = particle_sim.getCharges()[n] / space_step / space_step / eps0;
 
-            result(i_min + j_min * x_dim) += (1-i)*(1-j)*charge_density;
-            result(i_min + j_max * x_dim) += (1-i)*( j )*charge_density;
-            result(i_max + j_min * x_dim) += ( i )*(1-j)*charge_density;
-            result(i_max + j_max * x_dim) += ( i )*( j )*charge_density;
+            // If the node isn't on a wall...    ...deposit charge onto it
+            if (i_min > 0 && j_min > 0)             dest((i_min-1) + (j_min-1)*(x_dim-2)) -= (1-i)*(1-j)*charge_density;
+            if (i_min > 0 && j_max < y_dim-1)       dest((i_min-1) + (j_max-1)*(x_dim-2)) -= (1-i)*( j )*charge_density;
+            if (i_max < x_dim-1 && j_min > 0)       dest((i_max-1) + (j_min-1)*(x_dim-2)) -= ( i )*(1-j)*charge_density;
+            if (i_max < x_dim-1 && j_max < y_dim-1) dest((i_max-1) + (j_max-1)*(x_dim-2)) -= ( i )*( j )*charge_density;
         }
+    }
 
-        // Weird trick needed due to the Poisson eq with PEC BCs needing the density to be zero at corners
-        result(0) = 0; 
-        result(x_dim - 1) = 0;
-        result(mat_dim - x_dim) = 0;
-        result(mat_dim - 1) = 0;
+    void SimEngine::depositDivergence(Eigen::Vector<floatType, Eigen::Dynamic> &dest) {
+        const std::size_t x_dim = field_sim.getShape()[0], y_dim = field_sim.getShape()[1];
+        auto &fields = field_sim.getFields();
+        for (std::size_t i = 1; i < x_dim - 1; i++) { // We don't want to include the divergence at the walls
+            for (std::size_t j = 1; j < y_dim - 1; j++) {
+                dest((i-1) + (j-1)*(x_dim-2)) += (fields[0][i, j] - fields[0][i-1, j] + fields[1][i, j] - fields[1][i, j-1]) / space_step - background_charge;
+            }
+        }
+    }
+
+    Eigen::Vector<floatType, Eigen::Dynamic> SimEngine::calcDivDiff() {
+        const std::size_t x_dim = field_sim.getShape()[0], mat_dim = (x_dim - 2) * (field_sim.getShape()[1] - 2);
+        Eigen::Vector<floatType, Eigen::Dynamic> result = Eigen::Vector<floatType, Eigen::Dynamic>::Zero(mat_dim);
+        floatType i, j; // index-like coordinates aligned to nodes of the yee grid
+        floatType charge_density;
+        std::size_t i_min, i_max, j_min, j_max;
+
+        depositCharge(result);
+        depositDivergence(result);
 
         return result;
     }
 
     void SimEngine::cleanDivergence() {
-        static const auto poisson_LDLT = calcPoissonLDLT();
-        Eigen::Vector<floatType, Eigen::Dynamic> clean_potential = poisson_LDLT.solve(depositCharge());
-        std::size_t flat_index;
+        Eigen::Vector<floatType, Eigen::Dynamic> clean_potential = poisson_LDLT.solve(calcDivDiff());
+        std::size_t x_dim = field_sim.getShape()[0], y_dim = field_sim.getShape()[1];
 
-        assert(clean_potential.size() == field_sim.getShape()[0] * field_sim.getShape()[1]);
-        for (std::size_t i = 0; i < field_sim.getShape()[0]; i++) {
-            for (std::size_t j = 0; j < field_sim.getShape()[1]; j++) {
-                flat_index = j * field_sim.getShape()[0] + i;
-                if (i != field_sim.getShape()[0] - 1) {
-                    field_sim.getFields()[0][i, j] -= (clean_potential(flat_index + 1) - clean_potential(flat_index)) / space_step;
+        assert(clean_potential.size() == (x_dim-2) * (y_dim-2));
+        for (std::size_t i = 0; i < x_dim-1; i++) { // Skip nodes on the max walls as we are looking in the positve dirs for the gradients
+            for (std::size_t j = 0; j < y_dim-1; j++) {
+                if ((i == 0 || i == x_dim-2) && (j == 0 || j == y_dim-2)) { // Nothing on corners
+                    continue;
                 }
-                if (j != field_sim.getShape()[0] - 1) {
-                    field_sim.getFields()[1][i, j] -= (clean_potential(flat_index + field_sim.getShape()[0]) - clean_potential(flat_index)) / space_step;
+                else if (i == 0) { // For x=1/2 (potential on the walls is zero)
+                    field_sim.getFields()[0][i, j] -= clean_potential((j-1)*(x_dim-2)) / space_step;
+                }
+                else if (j == 0) { // For y=1/2
+                    field_sim.getFields()[1][i, j] -= clean_potential(i-1) / space_step;
+                }
+                else if (i == x_dim-2) { // For x=x_max-1
+                    field_sim.getFields()[0][i, j] -= -clean_potential((i-1) + (j-1)*(x_dim-2)) / space_step;
+                }
+                else if (j == y_dim-2) { // For y=y_max-1
+                    field_sim.getFields()[1][i, j] -= -clean_potential((i-1) + (j-1)*(x_dim-2)) / space_step;
+                }
+                else {
+                    field_sim.getFields()[0][i, j] -= (clean_potential((j-1)*(x_dim-2) + i) - clean_potential((j-1)*(x_dim-2) + i-1)) / space_step;
+                    field_sim.getFields()[1][i, j] -= (clean_potential(j*(x_dim-2) + i-1) - clean_potential((j-1)*(x_dim-2) + i-1)) / space_step;
                 }
             }
+        }
+    }
+
+    void SimEngine::exportPotential(std::string filename, const Eigen::Vector<floatType, Eigen::Dynamic> &potential) {
+        auto [x_dim, y_dim] = field_sim.getShape();
+        std::ofstream outfile(filename, std::ios_base::trunc);
+        for (std::size_t i = 0; i < x_dim-2; i++) {
+            for (std::size_t j = 0; j < y_dim-2; j++) {
+                outfile << std::format("{} ", potential(j*(x_dim-2) + i));
+            }
+            outfile << '\n';
         }
     }
 
@@ -335,6 +363,7 @@ namespace PIC {
     {
         floatType x = particle_sim.getPositions()[particle_num, 0], y = particle_sim.getPositions()[particle_num, 1]; // Physical coordinates of chosen particle
         const auto &fields_all = field_sim.getFields();
+        const auto &prev_fields = field_sim.getPrevFields();
 
         auto [i, j] = physToIndex({ x, y }, field_comp);
 
@@ -357,34 +386,13 @@ namespace PIC {
             fields[1, 1] = .5 * (fields_all[field_comp][imax, jmax] + prev_fields[field_comp][imax, jmax]);
         }
 
-        std::size_t inearest = i - imin < imax - i ? 0 : 1;
-        std::size_t jnearest = j - jmin < jmax - j ? 0 : 1;
         i -= imin; // i and j switch to just their fractional parts
         j -= jmin;
 
-        floatType result = 0; // Helper for longer formulas
-        switch (field_comp) { // Splining logic as described in Vay's paper for spline order n=1, energy conserving.
-            case 0:
-                [[fallthrough]];
-            case 4:
-                return (1 - j) * fields[inearest, 0] + j * fields[inearest, 1];
-
-            case 1:
-                [[fallthrough]];
-            case 3:
-                return (1 - i) * fields[0, jnearest] + i * fields[1, jnearest];
-
-            case 2:
-                result += (1 - j) * ((1 - i) * fields[0, 0] + i * fields[1, 0]);
-                result += j * ((1 - i) * fields[0, 1] + i * fields[1, 1]);
-                return result;
-            
-            case 5:
-                return fields[inearest, jnearest];
-            default:
-                assert(false && "invalid dimension");
-                std::unreachable();
-        }
+        floatType result = 0;
+        result += (1 - j) * ((1 - i) * fields[0, 0] + i * fields[1, 0]);
+        result += j * ((1 - i) * fields[0, 1] + i * fields[1, 1]);
+        return result;
     }
 
     MDVector<floatType, 2> SimEngine::fieldGather() {
@@ -412,14 +420,16 @@ namespace PIC {
             for (std::size_t field_comp = 0; field_comp < 2; field_comp++) {
                 floatType x = .5 * (positions[particle_num, 0] + prev_positions[particle_num, 0]);
                 floatType y = .5 * (positions[particle_num, 1] + prev_positions[particle_num, 1]);
+
+                assert(x >= 0 && y >= 0 && x < field_sim.getShape()[0] * space_step && y < field_sim.getShape()[1] * space_step); // The particle should be inside the sim region.
+
                 auto [i, j] = physToIndex({ x, y }, field_comp);
 
                 std::size_t imin = std::floor(i), imax = imin + 1, jmin = std::floor(j), jmax = jmin + 1;
-
-                floatType test = charges[particle_num] * velocities[particle_num, field_comp] / step / step;
+                i -= imin, j -= jmin;
 
                 if (i >= 0) {
-                    currents[field_comp][imin, jmax] += (1 - i) * j * test;
+                    currents[field_comp][imin, jmax] += (1 - i) * j * charges[particle_num] * velocities[particle_num, field_comp] / step / step;
                 }
                 if (j >= 0) {
                     currents[field_comp][imax, jmin] += i * (1 - j) * charges[particle_num] * velocities[particle_num, field_comp] / step / step;
@@ -432,21 +442,17 @@ namespace PIC {
         }
     }
 
-    SimEngine::SimEngine(const std::array<std::size_t, 2> shape, const std::size_t particle_num) : field_sim(shape), particle_sim(particle_num), prev_positions({ particle_num, 2 }),
-                                                                                                   tracked_positions(particle_num, MDVector<floatType, 2>({ particle_num, 2 })),
-                                                                                                   tracked_velocities(particle_num, MDVector<floatType, 2>({ particle_num, 2 })) {
-        prev_fields.fill(MDVector<floatType, 2>(shape));
-    }
-    SimEngine::SimEngine(std::array<std::size_t, 2> shape, std::size_t particle_num, floatType space_step) : SimEngine(shape, particle_num) {
-        this->space_step = space_step;
-        this->time_step = space_step / (c*std::sqrt(2));
+    SimEngine::SimEngine(std::array<std::size_t, 2> shape, std::size_t particle_num,
+                         floatType space_step, floatType time_step) : field_sim(shape), particle_sim(particle_num), prev_positions({ particle_num, 2 }),
+                                                                      tracked_positions(particle_num, MDVector<floatType, 2>({ particle_num, 2 })),
+                                                                      tracked_velocities(particle_num, MDVector<floatType, 2>({ particle_num, 2 })),
+                                                                      space_step(space_step), time_step(time_step),
+                                                                      poisson_LDLT(calcPoissonLDLT()) {
+        
         syncSteps();
     }
-    SimEngine::SimEngine(std::array<std::size_t, 2> shape, std::size_t particle_num, floatType space_step, floatType time_step) : SimEngine(shape, particle_num) {
-        this->space_step = space_step;
-        this->time_step = time_step;
-        syncSteps();
-    }
+    SimEngine::SimEngine(std::array<std::size_t, 2> shape, std::size_t particle_num, floatType space_step) : SimEngine(shape, particle_num, space_step, space_step / (c*std::sqrt(2.))) {}
+    SimEngine::SimEngine(const std::array<std::size_t, 2> shape, const std::size_t particle_num) : SimEngine(shape, particle_num, 1, 1 / (c*std::sqrt(2.))) {}
 
     FieldSolver &SimEngine::getFieldSim() {
         return field_sim;
@@ -455,16 +461,26 @@ namespace PIC {
         return particle_sim;
     }
 
+    floatType SimEngine::getBackgroundCharge() {
+        return background_charge;
+    }
+
+    void SimEngine::setBackgroundCharge(floatType val) {
+        background_charge = val;
+    }
+
     void SimEngine::exportTracked(std::string filename) {
+        floatType gamma;
         std::ofstream outfile(filename, std::ios_base::trunc);
         outfile << std::format("time step: {}, particle count: {}\n", particle_sim.getTimeStep(), particle_sim.getParticleCount());
 
         for (std::size_t particle = 0; particle < particle_sim.getParticleCount(); particle++) {
             outfile << std::format("particle {}:\n", particle + 1);
             for (std::size_t i = 0; i < tracked_positions[particle].shape[0]; i++) {
+                gamma = std::sqrt(1 + (tracked_velocities[particle][i, 0]*tracked_velocities[particle][i, 0] + tracked_velocities[particle][i, 1]*tracked_velocities[particle][i, 1]) / (c*c));
                 outfile << std::format("{} {} {} {}\n", tracked_positions[particle][i, 0], tracked_positions[particle][i, 1],
-                                                        1/std::sqrt(1/(c*c) + 1/(tracked_velocities[particle][i, 0]*tracked_velocities[particle][i, 0])),
-                                                        1/std::sqrt(1/(c*c) + 1/(tracked_velocities[particle][i, 1]*tracked_velocities[particle][i, 1])));
+                                                        tracked_velocities[particle][i, 0] / gamma,
+                                                        tracked_velocities[particle][i, 1] / gamma);
             }
         }
     }
@@ -478,12 +494,12 @@ namespace PIC {
         field_sim.init_PEC();
     }
 
-    void SimEngine::run(const unsigned long long n_steps)
-    {
+    void SimEngine::run(const unsigned long long n_steps) {
         for (std::size_t i = 0; i < n_steps; i++) {
             depositCurrent();
-            prev_fields = field_sim.getFields();
+            field_sim.getPrevFields() = field_sim.getFields();
             field_sim.solve(1);
+            cleanDivergence();
             prev_positions = particle_sim.getPositions();
             particle_sim.kickMove(fieldGather());
             particle_sim.removeOutside(space_step * (field_sim.getShape()[0] - 1), space_step * (field_sim.getShape()[1] - 1));

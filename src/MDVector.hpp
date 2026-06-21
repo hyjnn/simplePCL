@@ -9,6 +9,7 @@
 #pragma once
 #include <array>
 #include <concepts>
+#include <cmath>
 #include <exception>
 #include <vector>
 
@@ -83,6 +84,15 @@ struct MDVector {
         result[2] = left[0] * right[1] - left[1] * right[0];
 
         return result;
+    }
+
+    friend T norm(const MDVector<T, M> &vec) {
+        T result = 0;
+        for (std::size_t i = 0; i < vec.data.size(); i++) {
+            result += vec.data[i]*vec.data[i];
+        }
+        
+        return std::sqrt(result);
     }
 };
 
